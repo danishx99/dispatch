@@ -10,6 +10,72 @@ const HOME = os.homedir();
 const CWD = process.cwd();
 const TOOLS = ['claude', 'codex'];
 
+const HELP_TOP = `dispatch — move context between Claude Code and Codex CLI
+
+usage: dispatch <command> [options]
+
+commands:
+  fork <claude|codex>      Continue the current session in another tool
+  handoff <claude|codex>   Open a fresh session in another tool with a brief
+  init                     Install the handoff skill into your skills dir
+
+run \`dispatch <command> --help\` for command-specific options.
+
+requires tmux, plus claude and/or codex on PATH.`;
+
+const HELP_FORK = `usage: dispatch fork <claude|codex> [options]
+
+Continue the current session in another tool. Same-tool fork delegates to
+the tool's native fork machinery; cross-tool fork snapshots the source
+session and starts the target with a pointer prompt.
+
+options:
+  --new-pane             Open in a new tmux pane to the right (default)
+  --replace              Replace the current tmux pane instead
+  --source <claude|codex>  Restrict source-session resolution to one tool
+  --from <id>            Pin to a specific session UUID (requires --source)
+  -h, --help             Show this help
+
+examples:
+  dispatch fork codex                  # claude → codex via MRM source
+  dispatch fork claude --replace       # claude → claude, replace this pane
+  dispatch fork claude --source codex  # codex → claude (forced source)`;
+
+const HELP_HANDOFF = `usage: dispatch handoff <claude|codex> "<brief>"|- [options]
+
+Open the target tool in a fresh session with a brief as the first prompt.
+Pass \`-\` as the brief to read from stdin (heredoc-friendly). Usually
+invoked by an LLM via the installed handoff skill.
+
+options:
+  --new-pane             Open in a new tmux pane to the right (default)
+  --replace              Replace the current tmux pane instead
+  -h, --help             Show this help
+
+examples:
+  dispatch handoff codex "fix the failing test in foo.spec.ts"
+  dispatch handoff claude - <<'BRIEF'
+  ## Goal
+  ...
+  BRIEF`;
+
+const HELP_INIT = `usage: dispatch init [options]
+
+Interactively install the handoff skill into your skill directories.
+Detects ~/.claude/skills/ and ~/.agents/skills/ and offers each as a
+checkbox; existing dirs are pre-ticked. Press 1/2 to toggle, enter to
+install, q to cancel.
+
+Non-interactive (no TTY): installs to all detected skill directories,
+errors if none exist.
+
+options:
+  -h, --help             Show this help`;
+
+function hasHelp(args) {
+  return args.includes('-h') || args.includes('--help');
+}
+
 function die(msg, code = 1) {
   process.stderr.write(msg.endsWith('\n') ? msg : msg + '\n');
   process.exit(code);
@@ -153,9 +219,10 @@ function placeInPane(launchCmd, mode) {
 // --- commands ---
 
 function cmdFork(args) {
+  if (hasHelp(args)) { console.log(HELP_FORK); return; }
   const { flags, positional } = parseArgs(args);
   const target = positional[0];
-  if (!TOOLS.includes(target)) die('usage: dispatch fork <claude|codex> [--new-pane|--replace] [--source <claude|codex>] [--from <id>]');
+  if (!TOOLS.includes(target)) die(HELP_FORK);
   if (flags.source && !TOOLS.includes(flags.source)) die('--source must be claude or codex');
   requireTmux();
 
@@ -186,9 +253,10 @@ function cmdFork(args) {
 }
 
 function cmdHandoff(args) {
+  if (hasHelp(args)) { console.log(HELP_HANDOFF); return; }
   const { flags, positional } = parseArgs(args);
   const target = positional[0];
-  if (!TOOLS.includes(target)) die('usage: dispatch handoff <claude|codex> "<brief>"|- [--new-pane|--replace]');
+  if (!TOOLS.includes(target)) die(HELP_HANDOFF);
   let brief = positional[1];
   if (brief === undefined) die('handoff requires a brief (positional string or `-` for stdin)');
   if (brief === '-') {
@@ -219,7 +287,8 @@ function installSkillTo(dirs) {
   }
 }
 
-function cmdInit() {
+function cmdInit(args = []) {
+  if (hasHelp(args)) { console.log(HELP_INIT); return; }
   const candidates = [
     { label: '~/.claude/skills/', dir: path.join(HOME, '.claude', 'skills') },
     { label: '~/.agents/skills/', dir: path.join(HOME, '.agents', 'skills') },
@@ -299,12 +368,18 @@ const [,, sub, ...rest] = process.argv;
 switch (sub) {
   case 'fork': cmdFork(rest); break;
   case 'handoff': cmdHandoff(rest); break;
-  case 'init': cmdInit(); break;
+  case 'init': cmdInit(rest); break;
   case undefined:
   case '-h':
   case '--help':
-    console.log('usage: dispatch <fork|handoff|init> ...');
+    console.log(HELP_TOP);
     break;
+  case '-v':
+  case '--version': {
+    const pkg = require(path.resolve(path.dirname(fs.realpathSync(__filename)), '..', 'package.json'));
+    console.log(pkg.version);
+    break;
+  }
   default:
-    die(`unknown command: ${sub}`);
+    die(`unknown command: ${sub}\n\n${HELP_TOP}`);
 }
