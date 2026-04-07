@@ -236,48 +236,61 @@ function cmdInit() {
     return;
   }
 
-  const readline = require('readline');
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ask = (q) => new Promise(res => rl.question(q, res));
-
+  // Interactive raw-mode TTY render. Single keypress flips a row in place.
+  let renderedLines = 0;
   function render() {
-    console.log('\nInstall handoff skill to:');
+    if (renderedLines > 0) {
+      process.stdout.write(`\x1b[${renderedLines}A\x1b[0J`);
+    }
+    const lines = [];
+    lines.push('Install handoff skill to:');
     candidates.forEach((c, i) => {
       const mark = ticked[i] ? 'x' : ' ';
       const status = fs.existsSync(c.dir) ? '(exists)' : '(will create)';
-      console.log(`  [${mark}] ${i + 1}) ${c.label.padEnd(22)} ${status}`);
+      lines.push(`  [${mark}] ${i + 1}) ${c.label.padEnd(22)} ${status}`);
     });
-    console.log('');
+    lines.push('');
+    lines.push(`Press 1-${candidates.length} to toggle, enter to install, q to cancel`);
+    const out = lines.join('\n') + '\n';
+    process.stdout.write(out);
+    renderedLines = lines.length;
   }
 
-  (async () => {
-    while (true) {
-      render();
-      const ans = (await ask('Toggle a number to flip, enter to accept, q to cancel: ')).trim();
-      if (ans === 'q' || ans === 'Q') {
-        rl.close();
-        console.log('cancelled.');
+  function cleanup() {
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    process.stdin.pause();
+  }
+
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.setEncoding('utf8');
+  render();
+
+  process.stdin.on('data', (key) => {
+    // Cancel: q, Q, Esc, Ctrl-C
+    if (key === 'q' || key === 'Q' || key === '\u001b' || key === '\u0003') {
+      cleanup();
+      process.stdout.write('cancelled.\n');
+      process.exit(0);
+    }
+    // Accept: Enter
+    if (key === '\r' || key === '\n') {
+      if (!ticked.some(Boolean)) {
+        process.stdout.write('\x07'); // bell — nothing selected
         return;
       }
-      if (ans === '') {
-        if (!ticked.some(Boolean)) {
-          console.log('pick at least one location.');
-          continue;
-        }
-        rl.close();
-        break;
-      }
-      const n = parseInt(ans, 10);
-      if (Number.isInteger(n) && n >= 1 && n <= candidates.length) {
-        ticked[n - 1] = !ticked[n - 1];
-      } else {
-        console.log(`unknown input: ${ans}`);
-      }
+      cleanup();
+      const chosen = candidates.filter((_, i) => ticked[i]).map(c => c.dir);
+      installSkillTo(chosen);
+      process.exit(0);
     }
-
-    const chosen = candidates.filter((_, i) => ticked[i]).map(c => c.dir);
-    installSkillTo(chosen);
-  })();
+    // Toggle: number key
+    const n = parseInt(key, 10);
+    if (Number.isInteger(n) && n >= 1 && n <= candidates.length) {
+      ticked[n - 1] = !ticked[n - 1];
+      render();
+    }
+  });
 }
 
 // --- entrypoint ---
