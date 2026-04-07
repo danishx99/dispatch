@@ -1,5 +1,5 @@
 {
-  "name": "dispatch-cli",
+  "name": "@danishx99/dispatch-cli",
   "version": "0.1.0",
   "description": "Move context between Claude Code and Codex CLI without losing your place",
   "bin": {

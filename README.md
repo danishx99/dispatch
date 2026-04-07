@@ -27,11 +27,11 @@ Both commands open the new session in a fresh tmux pane to the right (`tmux spli
 ## Install
 
 ```bash
-npm i -g dispatch-cli
+npm i -g @danishx99/dispatch-cli
 dispatch init
 ```
 
-`dispatch init` interactively installs the `handoff` skill into the skill directories you pick. It detects `~/.claude/skills/` and `~/.agents/skills/` and offers each as a checkbox; existing dirs are pre-ticked.
+`dispatch init` interactively installs the `handoff` skill into the skill directories you pick. It detects `~/.claude/skills/` and `~/.agents/skills/` and offers each as a checkbox; existing dirs are pre-ticked. Press `1`/`2` to toggle, enter to install, `q` to cancel.
 
 To install from source instead:
 
@@ -64,7 +64,7 @@ Interactively install the `handoff` skill into your skill directories. Re-run af
 ## File layout
 
 ```
-$(npm root -g)/dispatch-cli/                   # package install
+$(npm root -g)/@danishx99/dispatch-cli/        # package install
 ~/.local/bin/dispatch                          # CLI symlink (managed by npm)
 ~/.dispatch/snapshots/<ts>-<uuid>.jsonl        # cross-tool fork snapshots (manual cleanup)
 ~/.claude/skills/handoff/SKILL.md              # installed handoff skill
