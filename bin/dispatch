@@ -201,19 +201,83 @@ function cmdHandoff(args) {
   placeInPane(launchCmd, flags.pane);
 }
 
-function cmdInit() {
-  const skillsRoot = path.join(HOME, '.agents', 'skills');
-  if (!fs.existsSync(skillsRoot)) {
-    die(`${skillsRoot}/ not found. Create it (your shared skills dir) and re-run dispatch init.`);
-  }
-  const dest = path.join(skillsRoot, 'handoff');
-  fs.mkdirSync(dest, { recursive: true });
-  // Resolve source SKILL.md relative to this script (follows symlinks).
+function installSkillTo(dirs) {
   const scriptPath = fs.realpathSync(__filename);
   const src = path.resolve(path.dirname(scriptPath), '..', 'skills', 'handoff', 'SKILL.md');
   if (!fs.existsSync(src)) die(`source skill not found at ${src}`);
-  fs.copyFileSync(src, path.join(dest, 'SKILL.md'));
-  console.log(`Installed handoff skill → ${path.join(dest, 'SKILL.md')}`);
+  // Dedupe by real path so a symlinked dir (e.g. ~/.claude/skills → ~/.agents/skills) isn't written twice.
+  const seen = new Set();
+  for (const dir of dirs) {
+    fs.mkdirSync(dir, { recursive: true });
+    const real = fs.realpathSync(dir);
+    if (seen.has(real)) continue;
+    seen.add(real);
+    const dest = path.join(dir, 'handoff');
+    fs.mkdirSync(dest, { recursive: true });
+    fs.copyFileSync(src, path.join(dest, 'SKILL.md'));
+    console.log(`Installed → ${path.join(dest, 'SKILL.md')}`);
+  }
+}
+
+function cmdInit() {
+  const candidates = [
+    { label: '~/.claude/skills/', dir: path.join(HOME, '.claude', 'skills') },
+    { label: '~/.agents/skills/', dir: path.join(HOME, '.agents', 'skills') },
+  ];
+  const ticked = candidates.map(c => fs.existsSync(c.dir));
+
+  // Non-TTY: install to all existing dirs, or fail loudly.
+  if (!process.stdin.isTTY) {
+    const chosen = candidates.filter((_, i) => ticked[i]).map(c => c.dir);
+    if (chosen.length === 0) {
+      die('no skill directories exist (~/.claude/skills/ or ~/.agents/skills/) and stdin is not a TTY. Run interactively or create one of these dirs first.');
+    }
+    installSkillTo(chosen);
+    return;
+  }
+
+  const readline = require('readline');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q) => new Promise(res => rl.question(q, res));
+
+  function render() {
+    console.log('\nInstall handoff skill to:');
+    candidates.forEach((c, i) => {
+      const mark = ticked[i] ? 'x' : ' ';
+      const status = fs.existsSync(c.dir) ? '(exists)' : '(will create)';
+      console.log(`  [${mark}] ${i + 1}) ${c.label.padEnd(22)} ${status}`);
+    });
+    console.log('');
+  }
+
+  (async () => {
+    while (true) {
+      render();
+      const ans = (await ask('Toggle a number to flip, enter to accept, q to cancel: ')).trim();
+      if (ans === 'q' || ans === 'Q') {
+        rl.close();
+        console.log('cancelled.');
+        return;
+      }
+      if (ans === '') {
+        if (!ticked.some(Boolean)) {
+          console.log('pick at least one location.');
+          continue;
+        }
+        rl.close();
+        break;
+      }
+      const n = parseInt(ans, 10);
+      if (Number.isInteger(n) && n >= 1 && n <= candidates.length) {
+        ticked[n - 1] = !ticked[n - 1];
+      } else {
+        console.log(`unknown input: ${ans}`);
+      }
+    }
+
+    const chosen = candidates.filter((_, i) => ticked[i]).map(c => c.dir);
+    installSkillTo(chosen);
+  })();
 }
 
 // --- entrypoint ---
