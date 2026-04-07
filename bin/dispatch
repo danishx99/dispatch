@@ -1,0 +1,233 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawnSync } = require('child_process');
+
+const HOME = os.homedir();
+const CWD = process.cwd();
+const TOOLS = ['claude', 'codex'];
+
+function die(msg, code = 1) {
+  process.stderr.write(msg.endsWith('\n') ? msg : msg + '\n');
+  process.exit(code);
+}
+
+function requireTmux() {
+  if (!process.env.TMUX) die('dispatch requires an active tmux session.');
+}
+
+function shellQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+function encodeCwdForClaude(cwd) {
+  return cwd.replace(/\//g, '-');
+}
+
+// Parse target + flags. Returns {target, flags, positional}.
+function parseArgs(args, allowed) {
+  const flags = {};
+  const positional = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--new-pane' || a === '--replace') {
+      flags.pane = a === '--replace' ? 'replace' : 'new-pane';
+    } else if (a === '--source') {
+      flags.source = args[++i];
+    } else if (a === '--from') {
+      flags.from = args[++i];
+    } else if (a.startsWith('--')) {
+      die(`unknown flag: ${a}`);
+    } else {
+      positional.push(a);
+    }
+  }
+  if (!flags.pane) flags.pane = 'new-pane';
+  return { flags, positional };
+}
+
+// --- source resolution ---
+
+function listClaudeSessions(cwd) {
+  const dir = path.join(HOME, '.claude', 'projects', encodeCwdForClaude(cwd));
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter(f => f.endsWith('.jsonl'))
+    .map(f => {
+      const p = path.join(dir, f);
+      const stat = fs.statSync(p);
+      return {
+        tool: 'claude',
+        id: f.replace(/\.jsonl$/, ''),
+        path: p,
+        mtime: stat.mtimeMs,
+      };
+    });
+}
+
+function readFirstLine(p) {
+  const fd = fs.openSync(p, 'r');
+  try {
+    const buf = Buffer.alloc(65536);
+    let acc = '';
+    while (true) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (n === 0) return acc;
+      acc += buf.slice(0, n).toString('utf8');
+      const i = acc.indexOf('\n');
+      if (i >= 0) return acc.slice(0, i);
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function listCodexSessions(cwd) {
+  const today = new Date();
+  const yyyy = String(today.getUTCFullYear());
+  const mm = String(today.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(today.getUTCDate()).padStart(2, '0');
+  const dir = path.join(HOME, '.codex', 'sessions', yyyy, mm, dd);
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
+    const p = path.join(dir, f);
+    let firstLine;
+    try { firstLine = readFirstLine(p); } catch { continue; }
+    let meta;
+    try { meta = JSON.parse(firstLine); } catch { continue; }
+    if (!meta || meta.type !== 'session_meta' || !meta.payload) continue;
+    if (meta.payload.cwd !== cwd) continue;
+    const stat = fs.statSync(p);
+    out.push({
+      tool: 'codex',
+      id: meta.payload.id,
+      path: p,
+      mtime: stat.mtimeMs,
+    });
+  }
+  return out;
+}
+
+function resolveSource(flags) {
+  // Explicit override path
+  if (flags.from) {
+    const tool = flags.source;
+    if (!tool) die('--from requires --source <claude|codex>');
+    if (!TOOLS.includes(tool)) die(`--source must be claude or codex`);
+    const candidates = tool === 'claude' ? listClaudeSessions(CWD) : listCodexSessions(CWD);
+    const hit = candidates.find(c => c.id === flags.from);
+    if (!hit) die(`no ${tool} session with id ${flags.from} in ${CWD}`);
+    return hit;
+  }
+
+  let candidates = [];
+  if (!flags.source || flags.source === 'claude') candidates = candidates.concat(listClaudeSessions(CWD));
+  if (!flags.source || flags.source === 'codex') candidates = candidates.concat(listCodexSessions(CWD));
+
+  if (candidates.length === 0) {
+    die(
+      `no sessions found for cwd ${CWD}\n` +
+      `  scanned: ~/.claude/projects/${encodeCwdForClaude(CWD)}/\n` +
+      `           ~/.codex/sessions/<today>/ (filtered by cwd)`
+    );
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  return candidates[0];
+}
+
+// --- pane placement ---
+
+function placeInPane(launchCmd, mode) {
+  const tmuxArgs = mode === 'replace'
+    ? ['respawn-pane', '-k', launchCmd]
+    : ['split-window', '-h', launchCmd];
+  const r = spawnSync('tmux', tmuxArgs, { stdio: 'inherit' });
+  if (r.status !== 0) die(`tmux ${tmuxArgs[0]} failed`);
+}
+
+// --- commands ---
+
+function cmdFork(args) {
+  const { flags, positional } = parseArgs(args);
+  const target = positional[0];
+  if (!TOOLS.includes(target)) die('usage: dispatch fork <claude|codex> [--new-pane|--replace] [--source <claude|codex>] [--from <id>]');
+  if (flags.source && !TOOLS.includes(flags.source)) die('--source must be claude or codex');
+  requireTmux();
+
+  const source = resolveSource(flags);
+
+  let launchCmd;
+  if (source.tool === target) {
+    // Same-tool fork: delegate to native fork machinery.
+    if (target === 'claude') {
+      launchCmd = `claude --resume ${source.id} --fork-session`;
+    } else {
+      launchCmd = `codex fork ${source.id}`;
+    }
+  } else {
+    // Cross-tool fork: snapshot + pointer prompt.
+    const snapDir = path.join(HOME, '.dispatch', 'snapshots');
+    fs.mkdirSync(snapDir, { recursive: true });
+    const ts = Math.floor(Date.now() / 1000);
+    const snapPath = path.join(snapDir, `${ts}-${source.id}.jsonl`);
+    fs.copyFileSync(source.path, snapPath);
+    const prompt =
+      `This session is a fork of ${source.tool}. The full prior session\n` +
+      `is at ${snapPath}. Read it for context as needed.`;
+    launchCmd = `${target} ${shellQuote(prompt)}`;
+  }
+
+  placeInPane(launchCmd, flags.pane);
+}
+
+function cmdHandoff(args) {
+  const { flags, positional } = parseArgs(args);
+  const target = positional[0];
+  if (!TOOLS.includes(target)) die('usage: dispatch handoff <claude|codex> "<brief>"|- [--new-pane|--replace]');
+  let brief = positional[1];
+  if (brief === undefined) die('handoff requires a brief (positional string or `-` for stdin)');
+  if (brief === '-') {
+    brief = fs.readFileSync(0, 'utf8');
+  }
+  if (!brief.trim()) die('brief is empty');
+  requireTmux();
+
+  const launchCmd = `${target} ${shellQuote(brief)}`;
+  placeInPane(launchCmd, flags.pane);
+}
+
+function cmdInit() {
+  const skillsRoot = path.join(HOME, '.agents', 'skills');
+  if (!fs.existsSync(skillsRoot)) {
+    die(`${skillsRoot}/ not found. Create it (your shared skills dir) and re-run dispatch init.`);
+  }
+  const dest = path.join(skillsRoot, 'handoff');
+  fs.mkdirSync(dest, { recursive: true });
+  // Resolve source SKILL.md relative to this script (follows symlinks).
+  const scriptPath = fs.realpathSync(__filename);
+  const src = path.resolve(path.dirname(scriptPath), '..', 'skills', 'handoff', 'SKILL.md');
+  if (!fs.existsSync(src)) die(`source skill not found at ${src}`);
+  fs.copyFileSync(src, path.join(dest, 'SKILL.md'));
+  console.log(`Installed handoff skill → ${path.join(dest, 'SKILL.md')}`);
+}
+
+// --- entrypoint ---
+
+const [,, sub, ...rest] = process.argv;
+switch (sub) {
+  case 'fork': cmdFork(rest); break;
+  case 'handoff': cmdHandoff(rest); break;
+  case 'init': cmdInit(); break;
+  case undefined:
+  case '-h':
+  case '--help':
+    console.log('usage: dispatch <fork|handoff|init> ...');
+    break;
+  default:
+    die(`unknown command: ${sub}`);
+}
